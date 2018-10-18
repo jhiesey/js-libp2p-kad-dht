@@ -2,6 +2,7 @@
 
 const waterfall = require('async/waterfall')
 const each = require('async/each')
+const eachOf = require('asunc/eachOf')
 const queue = require('async/queue')
 const mh = require('multihashes')
 
@@ -18,13 +19,13 @@ class Query {
    *
    * @param {DHT} dht - DHT instance
    * @param {Buffer} key
-   * @param {function(PeerId, function(Error, Object))} query - The query function to exectue
+   * @param {function(PeerId, function(Error, Object))} query - The query function to exectue TODO: update this
    *
    */
-  constructor (dht, key, query) {
+  constructor (dht, key, makeSlice) {
     this.dht = dht
     this.key = key
-    this.query = query
+    this.makeSlice = makeSlice
     this.concurrency = c.ALPHA
     this._log = utils.logger(this.dht.peerInfo.id, 'query:' + mh.toB58String(key))
   }
@@ -33,14 +34,16 @@ class Query {
    * Run this query, start with the given list of peers first.
    *
    * @param {Array<PeerId>} peers
+   * TODO: numSlices
    * @param {function(Error, Object)} callback
    * @returns {void}
    */
-  run (peers, callback) {
+  run (peers, numSlices, callback) {
     const run = {
       peersSeen: new Set(),
       errors: [],
-      peersToQuery: null
+      slices: null, // array of disjoint slice info
+      results: null // array of successful results
     }
 
     if (peers.length === 0) {
@@ -48,14 +51,34 @@ class Query {
       return callback()
     }
 
-    waterfall([
-      (cb) => PeerQueue.fromKey(this.key, cb),
-      (q, cb) => {
-        run.peersToQuery = q
-        each(peers, (p, cb) => addPeerToQuery(p, this.dht, run, cb), cb)
-      },
-      (cb) => workerQueue(this, run, cb)
-    ], (err) => {
+    // create correct number of slices
+    const slicePeers = []
+    for (let i = 0; i < numSlices; i++) {
+      slicePeers.push([])
+    }
+
+    // assign peers to slices round-robin style
+    peers.forEach((peer, i) => {
+      slicePeers[i % numSlices].push(peer)
+    })
+    run.slices = slicePeers.map((peers) => {
+      return {
+        peers,
+        query: this.makeSlice(peers),
+        peersToQuery: null
+      }
+    })
+
+    each(run.slices, (slice, cb) => {
+      waterfall([
+        (cb) => PeerQueue.fromKey(this.key, cb),
+        (q, cb) => {
+          slice.peersToQuery = q
+          each(slice.peers, (p, cb) => addPeerToQuery(p, this.dht, slice, run, cb), cb)
+        },
+        (cb) => workerQueue(this, slice, run, cb)
+      ], cb)
+    }, (err, results) => {
       this._log('query:done')
       if (err) {
         return callback(err)
@@ -64,14 +87,13 @@ class Query {
       if (run.errors.length === run.peersSeen.size) {
         return callback(run.errors[0])
       }
-      if (run.res && run.res.success) {
-        run.res.finalSet = run.peersSeen
-        return callback(null, run.res)
+
+      run.res = {
+        finalSet: run.peersSeen,
+        results: run.slices.map((slice) => slice.res)
       }
 
-      callback(null, {
-        finalSet: run.peersSeen
-      })
+      callback(null, run.res)
     })
   }
 }
@@ -80,15 +102,16 @@ class Query {
  * Use the queue from async to keep `concurrency` amount items running.
  *
  * @param {Query} query
+ SLICE
  * @param {Object} run
  * @param {function(Error)} callback
  * @returns {void}
  */
-function workerQueue (query, run, callback) {
+function workerQueue (query, slice, run, callback) {
   let killed = false
   const q = queue((next, cb) => {
     query._log('queue:work')
-    execQuery(next, query, run, (err, done) => {
+    execQuery(next, query, slice, run, (err, done) => {
       // Ignore after kill
       if (killed) {
         return cb()
@@ -109,8 +132,8 @@ function workerQueue (query, run, callback) {
   const fill = () => {
     query._log('queue:fill')
     while (q.length() < query.concurrency &&
-           run.peersToQuery.length > 0) {
-      q.push(run.peersToQuery.dequeue())
+           slice.peersToQuery.length > 0) {
+      q.push(slice.peersToQuery.dequeue())
     }
   }
 
@@ -140,18 +163,19 @@ function workerQueue (query, run, callback) {
  *
  * @param {PeerId} next
  * @param {Query} query
+ SLICE
  * @param {Object} run
  * @param {function(Error)} callback
  * @returns {void}
  * @private
  */
-function execQuery (next, query, run, callback) {
-  query.query(next, (err, res) => {
+function execQuery (next, query, slice, run, callback) {
+  slice.query(next, (err, res) => {
     if (err) {
       run.errors.push(err)
       callback()
     } else if (res.success) {
-      run.res = res
+      slice.res = res
       callback(null, true)
     } else if (res.closerPeers && res.closerPeers.length > 0) {
       each(res.closerPeers, (closer, cb) => {
@@ -173,12 +197,13 @@ function execQuery (next, query, run, callback) {
  *
  * @param {PeerId} next
  * @param {DHT} dht
+ SLICE
  * @param {Object} run
  * @param {function(Error)} callback
  * @returns {void}
  * @private
  */
-function addPeerToQuery (next, dht, run, callback) {
+function addPeerToQuery (next, dht, slice, run, callback) {
   if (dht._isSelf(next)) {
     return callback()
   }
@@ -188,7 +213,7 @@ function addPeerToQuery (next, dht, run, callback) {
   }
 
   run.peersSeen.add(next)
-  run.peersToQuery.enqueue(next, callback)
+  slice.peersToQuery.enqueue(next, callback)
 }
 
 module.exports = Query

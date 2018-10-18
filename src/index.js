@@ -270,39 +270,53 @@ class KadDHT {
             return cb(new Error('Failed to lookup key'))
           }
 
-          // we have peers, lets do the actualy query to them
-          const query = new Query(this, key, (peer, cb) => {
-            this._getValueOrPeers(peer, key, (err, rec, peers) => {
-              if (err) {
-                // If we have an invalid record we just want to continue and fetch a new one.
-                if (!(err instanceof errors.InvalidRecordError)) {
-                  return cb(err)
+          // we have peers, lets do the actual query to them
+          const perSlice = Math.ceil((vals.length - nvals) / c.DISJOINT_PATHS)
+          const slices = []
+          const query = new Query(this, key, c.DISJOINT_PATHS, () => {
+            const sliceVals = []
+            slices.push(sliceVals)
+
+            return (peer, cb) => {
+              this._getValueOrPeers(peer, key, (err, rec, peers) => {
+                if (err) {
+                  // If we have an invalid record we just want to continue and fetch a new one.
+                  if (!(err instanceof errors.InvalidRecordError)) {
+                    return cb(err)
+                  }
                 }
-              }
 
-              const res = { closerPeers: peers }
+                const res = { closerPeers: peers }
 
-              if ((rec && rec.value) ||
-                  err instanceof errors.InvalidRecordError) {
-                vals.push({
-                  val: rec && rec.value,
-                  from: peer
-                })
-              }
+                if ((rec && rec.value) ||
+                    err instanceof errors.InvalidRecordError) {
+                  sliceVals.push({
+                    val: rec && rec.value,
+                    from: peer
+                  })
+                }
 
-              // enough is enough
-              if (vals.length >= nvals) {
-                res.success = true
-              }
+                // enough is enough
+                if (sliceVals.length >= perSlice) {
+                  res.success = true
+                }
 
-              cb(null, res)
-            })
+                cb(null, res)
+              })
+            }
           })
 
           // run our query
           timeout((cb) => query.run(rtp, cb), options.maxTimeout)(cb)
         }
       ], (err) => {
+        // combine vals from each slice
+        slices.forEach((slice) => {
+          slice.forEach((val) => {
+            vals.push(val)
+          })
+        })
+
         if (err && vals.length === 0) {
           return callback(err)
         }
@@ -328,15 +342,17 @@ class KadDHT {
 
       const tablePeers = this.routingTable.closestPeers(id, c.ALPHA)
 
-      const q = new Query(this, key, (peer, callback) => {
-        waterfall([
-          (cb) => this._closerPeersSingle(key, peer, cb),
-          (closer, cb) => {
-            cb(null, {
-              closerPeers: closer
-            })
-          }
-        ], callback)
+      const q = new Query(this, key, c.DISJOINT_PATHS, () => {
+        return (peer, callback) => {
+          waterfall([
+            (cb) => this._closerPeersSingle(key, peer, cb),
+            (closer, cb) => {
+              cb(null, {
+                closerPeers: closer
+              })
+            }
+          ], callback)
+        }
       })
 
       q.run(tablePeers, (err, res) => {
@@ -536,25 +552,27 @@ class KadDHT {
           }
 
           // query the network
-          const query = new Query(this, id.id, (peer, cb) => {
-            waterfall([
-              (cb) => this._findPeerSingle(peer, id, cb),
-              (msg, cb) => {
-                const match = msg.closerPeers.find((p) => p.id.isEqual(id))
+          const query = new Query(this, id.id, c.DISJOINT_PATHS, () => {
+            return (peer, cb) => {
+              waterfall([
+                (cb) => this._findPeerSingle(peer, id, cb),
+                (msg, cb) => {
+                  const match = msg.closerPeers.find((p) => p.id.isEqual(id))
 
-                // found it
-                if (match) {
-                  return cb(null, {
-                    peer: match,
-                    success: true
+                  // found it
+                  if (match) {
+                    return cb(null, {
+                      peer: match,
+                      success: true
+                    })
+                  }
+
+                  cb(null, {
+                    closerPeers: msg.closerPeers
                   })
                 }
-
-                cb(null, {
-                  closerPeers: msg.closerPeers
-                })
-              }
-            ], cb)
+              ], cb)
+            }
           })
 
           timeout((cb) => {
@@ -563,10 +581,15 @@ class KadDHT {
         },
         (result, cb) => {
           this._log('findPeer %s: %s', id.toB58String(), result.success)
-          if (!result.peer) {
+          result.slices.forEach((result) => {
+            if (result.peer)
+              this.peerBook.put(result.peer)
+          })
+          const peer = this.peerBook.get(id)
+          if (!peer) {
             return cb(new errors.NotFoundError())
           }
-          cb(null, result.peer)
+          cb(null, peer)
         }
       ], callback)
     })
