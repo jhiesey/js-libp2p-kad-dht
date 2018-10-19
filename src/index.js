@@ -259,6 +259,9 @@ class KadDHT {
         return callback(null, vals)
       }
 
+      const perSlice = Math.ceil((vals.length - nvals) / c.DISJOINT_PATHS)
+      const slices = []
+
       waterfall([
         (cb) => utils.convertBuffer(key, cb),
         (id, cb) => {
@@ -271,9 +274,7 @@ class KadDHT {
           }
 
           // we have peers, lets do the actual query to them
-          const perSlice = Math.ceil((vals.length - nvals) / c.DISJOINT_PATHS)
-          const slices = []
-          const query = new Query(this, key, c.DISJOINT_PATHS, () => {
+          const query = new Query(this, key, () => {
             const sliceVals = []
             slices.push(sliceVals)
 
@@ -307,7 +308,7 @@ class KadDHT {
           })
 
           // run our query
-          timeout((cb) => query.run(rtp, cb), options.maxTimeout)(cb)
+          timeout((cb) => query.run(rtp, c.DISJOINT_PATHS, cb), options.maxTimeout)(cb)
         }
       ], (err) => {
         // combine vals from each slice
@@ -342,7 +343,7 @@ class KadDHT {
 
       const tablePeers = this.routingTable.closestPeers(id, c.ALPHA)
 
-      const q = new Query(this, key, c.DISJOINT_PATHS, () => {
+      const q = new Query(this, key, () => {
         return (peer, callback) => {
           waterfall([
             (cb) => this._closerPeersSingle(key, peer, cb),
@@ -355,7 +356,7 @@ class KadDHT {
         }
       })
 
-      q.run(tablePeers, (err, res) => {
+      q.run(tablePeers, c.DISJOINT_PATHS, (err, res) => {
         if (err) {
           return callback(err)
         }
@@ -552,7 +553,7 @@ class KadDHT {
           }
 
           // query the network
-          const query = new Query(this, id.id, c.DISJOINT_PATHS, () => {
+          const query = new Query(this, id.id, () => {
             return (peer, cb) => {
               waterfall([
                 (cb) => this._findPeerSingle(peer, id, cb),
@@ -576,20 +577,22 @@ class KadDHT {
           })
 
           timeout((cb) => {
-            query.run(peers, cb)
+            query.run(peers, c.DISJOINT_PATHS, cb)
           }, options.maxTimeout)(cb)
         },
         (result, cb) => {
-          this._log('findPeer %s: %s', id.toB58String(), result.success)
+          let success = false
           result.slices.forEach((result) => {
-            if (result.peer)
+            if (result.success) {
+              success = true
               this.peerBook.put(result.peer)
+            }
           })
-          const peer = this.peerBook.get(id)
-          if (!peer) {
+          this._log('findPeer %s: %s', id.toB58String(), success)
+          if (!success) {
             return cb(new errors.NotFoundError())
           }
-          cb(null, peer)
+          cb(null, this.peerBook.get(id))
         }
       ], callback)
     })

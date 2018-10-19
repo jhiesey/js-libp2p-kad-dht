@@ -478,7 +478,7 @@ module.exports = (dht) => ({
       // need more, query the network
       const perSlice = Math.ceil((out.length - n) / c.DISJOINT_PATHS)
       const slices = []
-      const query = new Query(dht, key.buffer, c.DISJOINT_PATHS, () => {
+      const query = new Query(dht, key.buffer, () => {
         const sliceProviders = new LimitedPeerList(perSlice)
         slices.push(sliceProviders)
 
@@ -509,7 +509,7 @@ module.exports = (dht) => ({
 
       const peers = dht.routingTable.closestPeers(key.buffer, c.ALPHA)
 
-      timeout((cb) => query.run(peers, cb), maxTimeout)((err) => {
+      timeout((cb) => query.run(peers, c.DISJOINT_PATHS, cb), maxTimeout)((err) => {
         // combine peers from each slice
         slices.forEach((slice) => {
           slice.toArray().forEach((peer) => {

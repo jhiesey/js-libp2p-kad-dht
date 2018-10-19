@@ -2,7 +2,6 @@
 
 const waterfall = require('async/waterfall')
 const each = require('async/each')
-const eachOf = require('asunc/eachOf')
 const queue = require('async/queue')
 const mh = require('multihashes')
 
@@ -39,17 +38,22 @@ class Query {
    * @returns {void}
    */
   run (peers, numSlices, callback) {
+    // console.log('query start')
     const run = {
       peersSeen: new Set(),
       errors: [],
-      slices: null, // array of disjoint slice info
-      results: null // array of successful results
+      slices: null // array of states per disjoint slice
     }
 
     if (peers.length === 0) {
       this._log.error('Running query with no peers')
       return callback()
     }
+
+    numSlices = Math.min(numSlices, peers.length)
+
+    if (Number.isNaN(numSlices))
+      throw new Error('wtf')
 
     // create correct number of slices
     const slicePeers = []
@@ -59,6 +63,7 @@ class Query {
 
     // assign peers to slices round-robin style
     peers.forEach((peer, i) => {
+      // console.log('LENGTH:', slicePeers.length, 'i:', i, 'numSlices:', numSlices)
       slicePeers[i % numSlices].push(peer)
     })
     run.slices = slicePeers.map((peers) => {
@@ -79,6 +84,7 @@ class Query {
         (cb) => workerQueue(this, slice, run, cb)
       ], cb)
     }, (err, results) => {
+      // console.log('query end')
       this._log('query:done')
       if (err) {
         return callback(err)
@@ -90,8 +96,14 @@ class Query {
 
       run.res = {
         finalSet: run.peersSeen,
-        results: run.slices.map((slice) => slice.res)
+        slices: []
       }
+
+      run.slices.forEach((slice) => {
+        if (slice.res && slice.res.success) {
+          run.res.slices.push(slice.res)
+        }
+      })
 
       callback(null, run.res)
     })
@@ -184,7 +196,7 @@ function execQuery (next, query, slice, run, callback) {
           return cb()
         }
         closer = query.dht.peerBook.put(closer)
-        addPeerToQuery(closer.id, query.dht, run, cb)
+        addPeerToQuery(closer.id, query.dht, slice, run, cb)
       }, callback)
     } else {
       callback()
