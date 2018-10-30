@@ -476,11 +476,11 @@ module.exports = (dht) => ({
       }
 
       // need more, query the network
-      const perSlice = Math.ceil((out.length - n) / c.DISJOINT_PATHS)
-      const slices = []
+      const perPath = Math.ceil((out.length - n) / c.DISJOINT_PATHS)
+      const paths = []
       const query = new Query(dht, key.buffer, () => {
-        const sliceProviders = new LimitedPeerList(perSlice)
-        slices.push(sliceProviders)
+        const pathProviders = new LimitedPeerList(perPath)
+        paths.push(pathProviders)
 
         return (peer, cb) => {
           waterfall([
@@ -490,11 +490,11 @@ module.exports = (dht) => ({
               dht._log('(%s) found %s provider entries', dht.peerInfo.id.toB58String(), provs.length)
 
               provs.forEach((prov) => {
-                sliceProviders.push(dht.peerBook.put(prov))
+                pathProviders.push(dht.peerBook.put(prov))
               })
 
               // hooray we have all that we want
-              if (sliceProviders.length >= perSlice) {
+              if (pathProviders.length >= perPath) {
                 return cb(null, {success: true})
               }
 
@@ -510,9 +510,9 @@ module.exports = (dht) => ({
       const peers = dht.routingTable.closestPeers(key.buffer, c.ALPHA)
 
       timeout((cb) => query.run(peers, c.DISJOINT_PATHS, cb), maxTimeout)((err) => {
-        // combine peers from each slice
-        slices.forEach((slice) => {
-          slice.toArray().forEach((peer) => {
+        // combine peers from each path
+        paths.forEach((path) => {
+          path.toArray().forEach((peer) => {
             out.push(peer)
           })
         })

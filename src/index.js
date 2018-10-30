@@ -259,8 +259,8 @@ class KadDHT {
         return callback(null, vals)
       }
 
-      const perSlice = Math.ceil((vals.length - nvals) / c.DISJOINT_PATHS)
-      const slices = []
+      const perPath = Math.ceil((vals.length - nvals) / c.DISJOINT_PATHS)
+      const paths = []
 
       waterfall([
         (cb) => utils.convertBuffer(key, cb),
@@ -275,8 +275,8 @@ class KadDHT {
 
           // we have peers, lets do the actual query to them
           const query = new Query(this, key, () => {
-            const sliceVals = []
-            slices.push(sliceVals)
+            const pathVals = []
+            paths.push(pathVals)
 
             return (peer, cb) => {
               this._getValueOrPeers(peer, key, (err, rec, peers) => {
@@ -291,14 +291,14 @@ class KadDHT {
 
                 if ((rec && rec.value) ||
                     err instanceof errors.InvalidRecordError) {
-                  sliceVals.push({
+                  pathVals.push({
                     val: rec && rec.value,
                     from: peer
                   })
                 }
 
                 // enough is enough
-                if (sliceVals.length >= perSlice) {
+                if (pathVals.length >= perPath) {
                   res.success = true
                 }
 
@@ -311,9 +311,9 @@ class KadDHT {
           timeout((cb) => query.run(rtp, c.DISJOINT_PATHS, cb), options.maxTimeout)(cb)
         }
       ], (err) => {
-        // combine vals from each slice
-        slices.forEach((slice) => {
-          slice.forEach((val) => {
+        // combine vals from each path
+        paths.forEach((path) => {
+          path.forEach((val) => {
             vals.push(val)
           })
         })
@@ -582,7 +582,7 @@ class KadDHT {
         },
         (result, cb) => {
           let success = false
-          result.slices.forEach((result) => {
+          result.paths.forEach((result) => {
             if (result.success) {
               success = true
               this.peerBook.put(result.peer)

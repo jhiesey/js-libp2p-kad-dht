@@ -61,8 +61,8 @@ describe('Query', () => {
     const q = new Query(dht, peer.id.id, () => query)
     q.run([peerInfos[1].id], 1, (err, res) => {
       expect(err).to.not.exist()
-      expect(res.slices[0].value).to.eql(Buffer.from('cool'))
-      expect(res.slices[0].success).to.eql(true)
+      expect(res.paths[0].value).to.eql(Buffer.from('cool'))
+      expect(res.paths[0].success).to.eql(true)
       expect(res.finalSet.size).to.eql(2)
       done()
     })

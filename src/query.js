@@ -18,13 +18,13 @@ class Query {
    *
    * @param {DHT} dht - DHT instance
    * @param {Buffer} key
-   * @param {function(PeerId, function(Error, Object))} query - The query function to exectue TODO: update this
+   * @param {function(PeerId, function(Error, Object))} makePath - The query function to exectue TODO: update this
    *
    */
-  constructor (dht, key, makeSlice) {
+  constructor (dht, key, makePath) {
     this.dht = dht
     this.key = key
-    this.makeSlice = makeSlice
+    this.makePath = makePath
     this.concurrency = c.ALPHA
     this._log = utils.logger(this.dht.peerInfo.id, 'query:' + mh.toB58String(key))
   }
@@ -33,16 +33,15 @@ class Query {
    * Run this query, start with the given list of peers first.
    *
    * @param {Array<PeerId>} peers
-   * TODO: numSlices
+   * @param {number} numPaths - Number of parallel disjoint paths to use
    * @param {function(Error, Object)} callback
    * @returns {void}
    */
-  run (peers, numSlices, callback) {
-    // console.log('query start')
+  run (peers, numPaths, callback) {
     const run = {
       peersSeen: new Set(),
       errors: [],
-      slices: null // array of states per disjoint slice
+      paths: null // array of states per disjoint path
     }
 
     if (peers.length === 0) {
@@ -50,41 +49,36 @@ class Query {
       return callback()
     }
 
-    numSlices = Math.min(numSlices, peers.length)
+    numPaths = Math.min(numPaths, peers.length)
 
-    if (Number.isNaN(numSlices))
-      throw new Error('wtf')
-
-    // create correct number of slices
-    const slicePeers = []
-    for (let i = 0; i < numSlices; i++) {
-      slicePeers.push([])
+    // create correct number of paths
+    const pathPeers = []
+    for (let i = 0; i < numPaths; i++) {
+      pathPeers.push([])
     }
 
-    // assign peers to slices round-robin style
+    // assign peers to paths round-robin style
     peers.forEach((peer, i) => {
-      // console.log('LENGTH:', slicePeers.length, 'i:', i, 'numSlices:', numSlices)
-      slicePeers[i % numSlices].push(peer)
+      pathPeers[i % numPaths].push(peer)
     })
-    run.slices = slicePeers.map((peers) => {
+    run.paths = pathPeers.map((peers, i) => {
       return {
         peers,
-        query: this.makeSlice(peers),
+        query: this.makePath(i),
         peersToQuery: null
       }
     })
 
-    each(run.slices, (slice, cb) => {
+    each(run.paths, (path, cb) => {
       waterfall([
         (cb) => PeerQueue.fromKey(this.key, cb),
         (q, cb) => {
-          slice.peersToQuery = q
-          each(slice.peers, (p, cb) => addPeerToQuery(p, this.dht, slice, run, cb), cb)
+          path.peersToQuery = q
+          each(path.peers, (p, cb) => addPeerToQuery(p, this.dht, path, run, cb), cb)
         },
-        (cb) => workerQueue(this, slice, run, cb)
+        (cb) => workerQueue(this, path, run, cb)
       ], cb)
     }, (err, results) => {
-      // console.log('query end')
       this._log('query:done')
       if (err) {
         return callback(err)
@@ -96,12 +90,12 @@ class Query {
 
       run.res = {
         finalSet: run.peersSeen,
-        slices: []
+        paths: []
       }
 
-      run.slices.forEach((slice) => {
-        if (slice.res && slice.res.success) {
-          run.res.slices.push(slice.res)
+      run.paths.forEach((path) => {
+        if (path.res && path.res.success) {
+          run.res.paths.push(path.res)
         }
       })
 
@@ -114,16 +108,16 @@ class Query {
  * Use the queue from async to keep `concurrency` amount items running.
  *
  * @param {Query} query
- SLICE
+ PATH
  * @param {Object} run
  * @param {function(Error)} callback
  * @returns {void}
  */
-function workerQueue (query, slice, run, callback) {
+function workerQueue (query, path, run, callback) {
   let killed = false
   const q = queue((next, cb) => {
     query._log('queue:work')
-    execQuery(next, query, slice, run, (err, done) => {
+    execQuery(next, query, path, run, (err, done) => {
       // Ignore after kill
       if (killed) {
         return cb()
@@ -144,8 +138,8 @@ function workerQueue (query, slice, run, callback) {
   const fill = () => {
     query._log('queue:fill')
     while (q.length() < query.concurrency &&
-           slice.peersToQuery.length > 0) {
-      q.push(slice.peersToQuery.dequeue())
+           path.peersToQuery.length > 0) {
+      q.push(path.peersToQuery.dequeue())
     }
   }
 
@@ -175,19 +169,19 @@ function workerQueue (query, slice, run, callback) {
  *
  * @param {PeerId} next
  * @param {Query} query
- SLICE
+ PATH
  * @param {Object} run
  * @param {function(Error)} callback
  * @returns {void}
  * @private
  */
-function execQuery (next, query, slice, run, callback) {
-  slice.query(next, (err, res) => {
+function execQuery (next, query, path, run, callback) {
+  path.query(next, (err, res) => {
     if (err) {
       run.errors.push(err)
       callback()
     } else if (res.success) {
-      slice.res = res
+      path.res = res
       callback(null, true)
     } else if (res.closerPeers && res.closerPeers.length > 0) {
       each(res.closerPeers, (closer, cb) => {
@@ -196,7 +190,7 @@ function execQuery (next, query, slice, run, callback) {
           return cb()
         }
         closer = query.dht.peerBook.put(closer)
-        addPeerToQuery(closer.id, query.dht, slice, run, cb)
+        addPeerToQuery(closer.id, query.dht, path, run, cb)
       }, callback)
     } else {
       callback()
@@ -209,13 +203,13 @@ function execQuery (next, query, slice, run, callback) {
  *
  * @param {PeerId} next
  * @param {DHT} dht
- SLICE
+ PATH
  * @param {Object} run
  * @param {function(Error)} callback
  * @returns {void}
  * @private
  */
-function addPeerToQuery (next, dht, slice, run, callback) {
+function addPeerToQuery (next, dht, path, run, callback) {
   if (dht._isSelf(next)) {
     return callback()
   }
@@ -225,7 +219,7 @@ function addPeerToQuery (next, dht, slice, run, callback) {
   }
 
   run.peersSeen.add(next)
-  slice.peersToQuery.enqueue(next, callback)
+  path.peersToQuery.enqueue(next, callback)
 }
 
 module.exports = Query
